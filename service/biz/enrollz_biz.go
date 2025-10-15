@@ -903,21 +903,92 @@ func verifyHMAC(ctx context.Context, req *VerifyIdentityWithHMACChallengeReq, fe
 	return challengeResp, nil
 }
 
+// verifyIAK verifies the IAK public key and certify info from the HMAC challenge response.
 func verifyIAKKey(ctx context.Context, req *VerifyIdentityWithHMACChallengeReq, hmacChallengeResp *epb.ChallengeResponse) (*tpm20.TPMTPublic, error) {
-	// TODO: impleament this function.
-	// 1. Verify IAK Certify Info.
-	// 2. Verify IAK attributes.
-	return &tpm20.TPMTPublic{}, nil
+	// Verify IAK Certify Info.
+	iakPubKey, err := tpm20.Unmarshal[tpm20.TPMTPublic](hmacChallengeResp.ChallengeResp.IakPub)
+	if err != nil {
+		errMsg := fmt.Errorf("failed to unmarshal IAK public key: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return nil, errMsg
+	}
+	iakCertifyInfo, err := tpm20.Unmarshal[tpm20.TPMSAttest](hmacChallengeResp.ChallengeResp.IakCertifyInfo)
+	if err != nil {
+		errMsg := fmt.Errorf("failed to unmarshal IAK Certify Info: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return nil, errMsg
+	}
+	err = req.Deps.VerifyCertifyInfo(iakCertifyInfo, iakPubKey)
+	if err != nil {
+		errMsg := fmt.Errorf("failed to verify IAK Certify Info: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return nil, errMsg
+	}
+
+	err = req.Deps.VerifyIAKAttributes(iakPubKey)
+	if err != nil {
+		errMsg := fmt.Errorf("failed to verify IAK attributes: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return nil, errMsg
+	}
+	return iakPubKey, nil
 }
 
 func verifyIDevIDKey(ctx context.Context, req *VerifyIdentityWithHMACChallengeReq, fetchEKResp *FetchEKResp, iakPubKey *tpm20.TPMTPublic) error {
-	// TODO: implement this function.
-	// 1. Get IDevID CSR from device.
-	// 2. Verify IDevID Certify Info Signature using IAK pub key.
-	// 3. Verify IDevID Certify Info.
-	// 4. Verify IDevID Key Attributes.
-	// 5. Verify CSR signature using IDevID
-	// 6. Verify EK returned in CSR matches one obtained from RoT
+	getIdevidCsrReq := &epb.GetIdevidCsrRequest{
+		ControlCardSelection: req.ControlCardSelection,
+		Key:                  fetchEKResp.KeyType,
+		KeyTemplate:          epb.KeyTemplate_KEY_TEMPLATE_ECC_NIST_P384,
+	}
+
+	getIdevidCsrResp, err := req.Deps.GetIdevidCsr(ctx, getIdevidCsrReq)
+	if err != nil {
+		errMsg := fmt.Errorf("failed to get IDevID CSR: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return errMsg
+	}
+
+	idevidCsrContents, err := req.Deps.ParseTCGCSRIDevIDContent(getIdevidCsrResp.CsrResponse.CsrContents)
+	if err != nil {
+		errMsg := fmt.Errorf("failed to parse IDevID CSR: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return errMsg
+	}
+
+	err = req.Deps.VerifyTPMTSignature(iakPubKey, &idevidCsrContents.SignCertifyInfoSignature, tpm20.Marshal(idevidCsrContents.SignCertifyInfo))
+	if err != nil {
+		errMsg := fmt.Errorf("failed to verify IDevID certify info signature using IAK public key: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return errMsg
+	}
+
+	err = req.Deps.VerifyCertifyInfo(&idevidCsrContents.SignCertifyInfo, &idevidCsrContents.IDevIDPub)
+	if err != nil {
+		errMsg := fmt.Errorf("failed to verify IDevID certify info: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return errMsg
+	}
+
+	err = req.Deps.VerifyIDevIDAttributes(&idevidCsrContents.IDevIDPub, getIdevidCsrReq.KeyTemplate)
+	if err != nil {
+		errMsg := fmt.Errorf("failed to verify IDevID attributes: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return errMsg
+	}
+
+	idevidCsrSignature, err := tpm20.Unmarshal[tpm20.TPMTSignature](getIdevidCsrResp.CsrResponse.IdevidSignatureCsr)
+	if err != nil {
+		errMsg := fmt.Errorf("failed to unmarshal IDevID CSR signature: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return errMsg
+	}
+
+	err = req.Deps.VerifyTPMTSignature(&idevidCsrContents.IDevIDPub, idevidCsrSignature, getIdevidCsrResp.CsrResponse.CsrContents)
+	if err != nil {
+		errMsg := fmt.Errorf("failed to verify IDevID CSR signature using IDevID public key: %w", err)
+		log.ErrorContext(ctx, errMsg)
+		return errMsg
+	}
 
 	return nil
 }
